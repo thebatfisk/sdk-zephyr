@@ -7,6 +7,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/******************************************************************************
+SparkFunSX1509.cpp
+SparkFun SX1509 I/O Expander Library Source File
+Jim Lindblom @ SparkFun Electronics
+Original Creation Date: September 21, 2015
+https://github.com/sparkfun/SparkFun_SX1509_Arduino_Library
+
+Here you'll find the Arduino code used to interface with the SX1509 I2C
+16 I/O expander. There are functions to take advantage of everything the
+SX1509 provides - input/output setting, writing pins high/low, reading 
+the input value of pins, LED driver utilities (blink, breath, pwm), and
+keypad engine utilites.
+
+Development environment specifics:
+	IDE: Arduino 1.6.5
+	Hardware Platform: Arduino Uno
+	SX1509 Breakout Version: v2.0
+
+This code is beerware; if you see me (or any other SparkFun employee) at the
+local, and you've found our code helpful, please buy us a round!
+
+Distributed as-is; no warranty is given.
+******************************************************************************/
+
 #define DT_DRV_COMPAT semtech_sx1509b
 
 #include <errno.h>
@@ -15,6 +39,7 @@
 #include <device.h>
 #include <init.h>
 #include <drivers/gpio.h>
+#include <drivers/gpio/gpio_sx1509b.h>
 #include <drivers/i2c.h>
 #include <sys/byteorder.h>
 #include <sys/util.h>
@@ -77,6 +102,9 @@ struct sx1509b_drv_data {
 
 };
 
+/** Variable for checking if a pin is configured for PWM */
+uint16_t pin_pwm_configured;
+
 /** Configuration data */
 struct sx1509b_config {
 	/* gpio_driver_config needs to be first */
@@ -110,6 +138,14 @@ enum {
 	SX1509B_REG_CLOCK_FOSC_INT_2MHZ = 2 << 5,
 };
 
+/* Register bits for SX1509B_REG_MISC */
+enum {
+	SX1509B_REG_MISC_LOG_A          = 1 << 3,
+	SX1509B_REG_MISC_LOG_B          = 1 << 7,
+	/* ClkX = fOSC */
+	SX1509B_REG_MISC_FREQ           = 1 << 4,
+};
+
 /* Pin configuration register addresses */
 enum {
 	SX1509B_REG_INPUT_DISABLE       = 0x00,
@@ -123,6 +159,8 @@ enum {
 	SX1509B_REG_INTERRUPT_SENSE_B   = 0x14,
 	SX1509B_REG_INTERRUPT_SENSE_A   = 0x16,
 	SX1509B_REG_INTERRUPT_SOURCE    = 0x18,
+	SX1509B_REG_MISC                = 0x1f,
+	SX1509B_REG_LED_DRV_ENABLE      = 0x20,
 	SX1509B_REG_DEBOUNCE_CONFIG     = 0x22,
 	SX1509B_REG_DEBOUNCE_ENABLE     = 0x23,
 };
@@ -134,6 +172,54 @@ enum {
 	SX1509B_EDGE_FALLING  = 0x02,
 	SX1509B_EDGE_BOTH     = 0x03,
 };
+
+/* Intensity (PWM) register addresses for all 16 pins */
+static const uint8_t INTENSITY_REGISTERS[16] = { 0x2a, 0x2d, 0x30, 0x33,
+						 0x36, 0x3b, 0x40, 0x45,
+						 0x4a, 0x4d, 0x50, 0x53,
+						 0x56, 0x5b, 0x60, 0x65 };
+
+/**
+ * @brief Read a big-endian word from an internal address of an I2C slave.
+ *
+ * @param dev Pointer to the device structure for the driver instance.
+ * @param dev_addr Address of the I2C device for reading.
+ * @param reg_addr Address of the internal register being read.
+ *
+ * @retval 0 If successful.
+ * @retval -EIO General input / output error.
+ */
+static inline uint16_t i2c_reg_read_word_be(struct device *dev, uint16_t dev_addr,
+					    uint8_t reg_addr)
+{
+	uint8_t rx_buf[2];
+
+	i2c_write(dev, &reg_addr, 1, dev_addr);
+	i2c_read(dev, rx_buf, 2, dev_addr);
+
+	return (rx_buf[0] << 8) | rx_buf[1];
+}
+
+/**
+ * @brief Read a big-endian byte from an internal address of an I2C slave.
+ *
+ * @param dev Pointer to the device structure for the driver instance.
+ * @param dev_addr Address of the I2C device for reading.
+ * @param reg_addr Address of the internal register being read.
+ *
+ * @retval 0 If successful.
+ * @retval -EIO General input / output error.
+ */
+static inline uint8_t i2c_reg_read_byte_be(struct device *dev, uint16_t dev_addr,
+					   uint8_t reg_addr)
+{
+	uint8_t rx_buf;
+
+	i2c_write(dev, &reg_addr, 1, dev_addr);
+	i2c_read(dev, &rx_buf, 1, dev_addr);
+
+	return rx_buf;
+}
 
 /**
  * @brief Write a big-endian word to an internal address of an I2C slave.
@@ -264,6 +350,34 @@ static int sx1509b_config(struct device *dev,
 	}
 
 	k_sem_take(&drv_data->lock, K_FOREVER);
+
+	if (pin_pwm_configured | (1 << pin)) {
+		uint16_t temp_word;
+
+		// Enable input buffer
+		temp_word = i2c_reg_read_word_be(drv_data->i2c_master,
+						 cfg->i2c_slave_addr,
+						 SX1509B_REG_INPUT_DISABLE);
+		temp_word &= ~(1 << pin);
+		rc |= i2c_reg_write_word_be(drv_data->i2c_master,
+					    cfg->i2c_slave_addr,
+					    SX1509B_REG_INPUT_DISABLE,
+					    temp_word);
+
+		// Disable LED driver operation
+		temp_word = i2c_reg_read_word_be(drv_data->i2c_master,
+						 cfg->i2c_slave_addr,
+						 SX1509B_REG_LED_DRV_ENABLE);
+		temp_word &= ~(1 << pin);
+		rc |= i2c_reg_write_word_be(drv_data->i2c_master,
+					    cfg->i2c_slave_addr,
+					    SX1509B_REG_LED_DRV_ENABLE,
+					    temp_word);
+
+		if (rc) {
+			goto out;
+		}
+	}
 
 	pins->open_drain &= ~BIT(pin);
 	if ((flags & GPIO_SINGLE_ENDED) != 0) {
@@ -584,11 +698,8 @@ static int sx1509b_init(struct device *dev)
 
 	/* Reset state mediated by initial configuration */
 	drv_data->pin_state = (struct sx1509b_pin_state) {
-		.dir = (ALL_PINS
-			& ~(DT_INST_PROP(0, init_out_low)
-			    | DT_INST_PROP(0, init_out_high))),
-		.data = (ALL_PINS
-			 & ~DT_INST_PROP(0, init_out_low)),
+		.dir = 0xFFFF,
+		.data = 0xFFFF,
 	};
 	drv_data->debounce_state = (struct sx1509b_debounce_state) {
 		.debounce_config = CONFIG_GPIO_SX1509B_DEBOUNCE_TIME,
@@ -599,18 +710,26 @@ static int sx1509b_init(struct device *dev)
 				SX1509B_REG_CLOCK_FOSC_INT_2MHZ);
 	if (rc == 0) {
 		rc = i2c_reg_write_word_be(drv_data->i2c_master,
-					   cfg->i2c_slave_addr,
-					   SX1509B_REG_DATA,
-					   drv_data->pin_state.data);
-	}
-	if (rc == 0) {
-		rc = i2c_reg_write_word_be(drv_data->i2c_master,
-					   cfg->i2c_slave_addr,
-					   SX1509B_REG_DIR,
+					   cfg->i2c_slave_addr, SX1509B_REG_DIR,
 					   drv_data->pin_state.dir);
 	}
-	if (rc != 0) {
-		goto out;
+	if (rc == 0) {
+		rc = i2c_reg_write_byte_be(drv_data->i2c_master,
+					   cfg->i2c_slave_addr,
+					   SX1509B_REG_MISC,
+					   SX1509B_REG_MISC_LOG_A);
+	}
+	if (rc == 0) {
+		rc = i2c_reg_write_byte_be(drv_data->i2c_master,
+					   cfg->i2c_slave_addr,
+					   SX1509B_REG_MISC,
+					   SX1509B_REG_MISC_LOG_B);
+	}
+	if (rc == 0) {
+		rc = i2c_reg_write_byte_be(drv_data->i2c_master,
+					   cfg->i2c_slave_addr,
+					   SX1509B_REG_MISC,
+					   SX1509B_REG_MISC_FREQ);
 	}
 
 out:
@@ -646,6 +765,93 @@ static const struct gpio_driver_api api_table = {
 	.manage_callback = gpio_sx1509b_manage_callback,
 #endif
 };
+
+int sx1509b_pwm_pin_configure(struct device *dev, uint8_t pin)
+{
+	/* Can't do I2C bus operations from an ISR */
+	if (k_is_in_isr()) {
+		return -EWOULDBLOCK;
+	}
+
+	int rc = 0;
+	const struct sx1509b_config *cfg = dev->config_info;
+	struct sx1509b_drv_data *drv_data = dev->driver_data;
+	uint16_t temp_word;
+
+	rc |= k_sem_take(&drv_data->lock, K_FOREVER);
+
+	// Disable input buffer
+	temp_word =
+		i2c_reg_read_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				     SX1509B_REG_INPUT_DISABLE);
+	temp_word |= (1 << pin);
+	rc |= i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				    SX1509B_REG_INPUT_DISABLE, temp_word);
+	drv_data->pin_state.input_disable |= (1 << pin);
+
+	// Disable pull-up
+	temp_word = i2c_reg_read_word_be(
+		drv_data->i2c_master, cfg->i2c_slave_addr, SX1509B_REG_PULL_UP);
+	temp_word &= ~(1 << pin);
+	rc |= i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				    SX1509B_REG_PULL_UP, temp_word);
+	drv_data->pin_state.pull_up &= ~(1 << pin);
+
+	// Set direction to output
+	temp_word = i2c_reg_read_word_be(drv_data->i2c_master,
+					 cfg->i2c_slave_addr, SX1509B_REG_DIR);
+	temp_word &= ~(1 << pin);
+	rc |= i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				    SX1509B_REG_DIR, temp_word);
+	drv_data->pin_state.dir &= ~(1 << pin);
+
+	// Enable LED driver operation
+	temp_word =
+		i2c_reg_read_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				     SX1509B_REG_LED_DRV_ENABLE);
+	temp_word |= (1 << pin);
+	rc |= i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				    SX1509B_REG_LED_DRV_ENABLE, temp_word);
+
+	// Set PWM value to 0
+	rc |= i2c_reg_write_byte_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				    INTENSITY_REGISTERS[pin], 0);
+
+	// Set REG_DATA bit low ~ LED driver started
+	temp_word = i2c_reg_read_word_be(drv_data->i2c_master,
+					 cfg->i2c_slave_addr, SX1509B_REG_DATA);
+	temp_word &= ~(1 << pin);
+	rc |= i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				    SX1509B_REG_DATA, temp_word);
+	drv_data->pin_state.data &= ~(1 << pin);
+
+	k_sem_give(&drv_data->lock);
+
+	pin_pwm_configured |= (1 << pin);
+
+	return rc;
+}
+
+int sx1509b_set_pwm_val(struct device *dev, uint8_t pin, uint8_t pwm_value)
+{
+	/* Can't do I2C bus operations from an ISR */
+	if (k_is_in_isr()) {
+		return -EWOULDBLOCK;
+	}
+
+	int rc;
+	const struct sx1509b_config *cfg = dev->config_info;
+	struct sx1509b_drv_data *drv_data = dev->driver_data;
+
+	k_sem_take(&drv_data->lock, K_FOREVER);
+
+	rc = i2c_reg_write_byte_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				   INTENSITY_REGISTERS[pin], pwm_value);
+
+	k_sem_give(&drv_data->lock);
+
+	return rc;
+}
 
 static const struct sx1509b_config sx1509b_cfg = {
 	.common = {
