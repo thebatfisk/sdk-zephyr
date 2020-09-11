@@ -147,7 +147,7 @@ enum {
 	SX1509B_EDGE_BOTH     = 0x03,
 };
 
-/* Intensity (PWM) register addresses for all 16 pins */
+/* Intensity register addresses for all 16 pins */
 static const uint8_t intensity_registers[16] = { 0x2a, 0x2d, 0x30, 0x33,
 						 0x36, 0x3b, 0x40, 0x45,
 						 0x4a, 0x4d, 0x50, 0x53,
@@ -691,12 +691,12 @@ static const struct gpio_driver_api api_table = {
 #endif
 };
 
-int sx1509b_pwm_pin_configure(struct device *dev, gpio_pin_t pin)
+int sx1509b_led_intensity_pin_configure(struct device *dev, gpio_pin_t pin)
 {
 	const struct sx1509b_config *cfg = dev->config_info;
 	struct sx1509b_drv_data *drv_data = dev->driver_data;
 	struct sx1509b_pin_state *pins = &drv_data->pin_state;
-	int rc = 0;
+	int rc;
 
 	/* Can't do I2C bus operations from an ISR */
 	if (k_is_in_isr()) {
@@ -711,27 +711,35 @@ int sx1509b_pwm_pin_configure(struct device *dev, gpio_pin_t pin)
 
 	/* Enable LED driver */
 	drv_data->led_drv_enable |= BIT(pin);
-	rc |= i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
-				    SX1509B_REG_LED_DRV_ENABLE,
-				    drv_data->led_drv_enable);
+	rc = i2c_reg_write_word_be(drv_data->i2c_master, cfg->i2c_slave_addr,
+				   SX1509B_REG_LED_DRV_ENABLE,
+				   drv_data->led_drv_enable);
 
-	/* Set (PWM) intensity to 0 */
-	rc |= i2c_reg_write_byte_be(drv_data->i2c_master, cfg->i2c_slave_addr,
-				    intensity_registers[pin], 0);
+	/* Set intensity to 0 */
+	if (rc == 0) {
+		rc = i2c_reg_write_byte_be(drv_data->i2c_master,
+					   cfg->i2c_slave_addr,
+					   intensity_registers[pin], 0);
+	} else {
+		goto out;
+	}
 
 	pins->input_disable |= BIT(pin);
 	pins->pull_up &= ~BIT(pin);
 	pins->dir &= ~BIT(pin);
 	pins->data &= ~BIT(pin);
 
-	rc |= write_pin_state(cfg, drv_data, pins, false);
+	if (rc == 0) {
+		rc = write_pin_state(cfg, drv_data, pins, false);
+	}
 
+out:
 	k_sem_give(&drv_data->lock);
-
 	return rc;
 }
 
-int sx1509b_pwm_pin_set(struct device *dev, gpio_pin_t pin, uint8_t pwm_value)
+int sx1509b_led_intensity_pin_set(struct device *dev, gpio_pin_t pin,
+				  uint8_t intensity_val)
 {
 	const struct sx1509b_config *cfg = dev->config_info;
 	struct sx1509b_drv_data *drv_data = dev->driver_data;
@@ -749,7 +757,7 @@ int sx1509b_pwm_pin_set(struct device *dev, gpio_pin_t pin, uint8_t pwm_value)
 	k_sem_take(&drv_data->lock, K_FOREVER);
 
 	rc = i2c_reg_write_byte_be(drv_data->i2c_master, cfg->i2c_slave_addr,
-				   intensity_registers[pin], pwm_value);
+				   intensity_registers[pin], intensity_val);
 
 	k_sem_give(&drv_data->lock);
 
