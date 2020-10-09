@@ -140,8 +140,9 @@ int bt_mesh_provision(const uint8_t net_key[16], uint16_t net_idx,
 	return 0;
 }
 
-int bt_mesh_provision_adv(const uint8_t uuid[16], uint16_t net_idx, uint16_t addr,
-			  uint8_t attention_duration)
+int bt_mesh_provision_adv(const uint8_t uuid[16], uint16_t net_idx,
+			  uint16_t addr, uint8_t attention_duration,
+			  bool only_attent)
 {
 	if (!atomic_test_bit(bt_mesh.flags, BT_MESH_VALID)) {
 		return -EINVAL;
@@ -154,7 +155,7 @@ int bt_mesh_provision_adv(const uint8_t uuid[16], uint16_t net_idx, uint16_t add
 	if (IS_ENABLED(CONFIG_BT_MESH_PROVISIONER) &&
 	    IS_ENABLED(CONFIG_BT_MESH_PB_ADV)) {
 		return bt_mesh_pb_adv_open(uuid, net_idx, addr,
-					   attention_duration);
+					   attention_duration, only_attent);
 	}
 
 	return -ENOTSUP;
@@ -349,4 +350,9 @@ int bt_mesh_start(void)
 	bt_mesh_model_foreach(model_start, NULL);
 
 	return 0;
+}
+
+bool bt_mesh_prov_link_active(void)
+{
+	return bt_mesh_get_prov_link_active_flag();
 }

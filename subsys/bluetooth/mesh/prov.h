@@ -17,7 +17,7 @@
 #define PROV_ERR_ADDR          0x08
 
 int bt_mesh_pb_adv_open(const uint8_t uuid[16], uint16_t net_idx, uint16_t addr,
-			uint8_t attention_duration);
+			uint8_t attention_duration, bool only_attent);
 
 void bt_mesh_pb_adv_recv(struct net_buf_simple *buf);
 
@@ -34,3 +34,5 @@ int bt_mesh_prov_init(const struct bt_mesh_prov *prov);
 void bt_mesh_prov_complete(uint16_t net_idx, uint16_t addr);
 void bt_mesh_prov_node_added(uint16_t net_idx, uint16_t addr, uint8_t num_elem);
 void bt_mesh_prov_reset(void);
+
+bool bt_mesh_get_prov_link_active_flag(void);

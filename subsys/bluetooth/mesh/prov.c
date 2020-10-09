@@ -127,6 +127,8 @@ static struct prov_link link;
 
 static const struct bt_mesh_prov *prov;
 
+static bool only_attention;
+
 static void send_pub_key(void);
 static void pub_key_ready(const uint8_t *pkey);
 static void start_sent(int err, void *cb_data);
@@ -342,19 +344,24 @@ static void prov_capabilities(const uint8_t *data)
 		return;
 	}
 
-	link.provisioner->node =
-		bt_mesh_cdb_node_alloc(link.provisioner->uuid,
-				       link.provisioner->addr, data[0],
-				       link.provisioner->net_idx);
-	if (link.provisioner->node == NULL) {
-		BT_ERR("Failed allocating node 0x%04x", link.provisioner->addr);
-		prov_fail(PROV_ERR_RESOURCES);
-		return;
+	if (only_attention) {
+		prov_link_close(PROV_BEARER_LINK_STATUS_TIMEOUT);
+	} else {
+		link.provisioner->node =
+			bt_mesh_cdb_node_alloc(link.provisioner->uuid,
+					       link.provisioner->addr, data[0],
+					       link.provisioner->net_idx);
+		if (link.provisioner->node == NULL) {
+			BT_ERR("Failed allocating node 0x%04x",
+			       link.provisioner->addr);
+			prov_fail(PROV_ERR_RESOURCES);
+			return;
+		}
+
+		memcpy(&link.conf_inputs[1], data, 11);
+
+		send_start();
 	}
-
-	memcpy(&link.conf_inputs[1], data, 11);
-
-	send_start();
 }
 
 static bt_mesh_output_action_t output_action(uint8_t action)
@@ -1132,9 +1139,10 @@ static const struct prov_bearer_cb prov_bearer_cb = {
 
 #if defined(CONFIG_BT_MESH_PB_ADV)
 int bt_mesh_pb_adv_open(const uint8_t uuid[16], uint16_t net_idx, uint16_t addr,
-			uint8_t attention_duration)
+			uint8_t attention_duration, bool only_attent)
 {
 	int err;
+	only_attention = only_attent;
 
 	if (atomic_test_and_set_bit(link.flags, LINK_ACTIVE)) {
 		return -EBUSY;
@@ -1260,4 +1268,9 @@ void bt_mesh_prov_reset(void)
 	if (prov->reset) {
 		prov->reset();
 	}
+}
+
+bool bt_mesh_get_prov_link_active_flag(void)
+{
+	return atomic_test_bit(link.flags, LINK_ACTIVE);
 }

@@ -279,8 +279,9 @@ int bt_mesh_provision(const uint8_t net_key[16], uint16_t net_idx,
  *
  *  @return Zero on success or (negative) error code otherwise.
  */
-int bt_mesh_provision_adv(const uint8_t uuid[16], uint16_t net_idx, uint16_t addr,
-			  uint8_t attention_duration);
+int bt_mesh_provision_adv(const uint8_t uuid[16], uint16_t net_idx,
+			  uint16_t addr, uint8_t attention_duration,
+			  bool only_attent);
 
 /** @brief Check if the local node has been provisioned.
  *
@@ -433,6 +434,11 @@ int bt_mesh_lpn_poll(void);
  *  @param cb Function to call when the Friendship status changes.
  */
 void bt_mesh_lpn_set_cb(void (*cb)(uint16_t friend_addr, bool established));
+
+/** @brief Get the provision link active flag.
+ *  @return Value of provision link active flag.
+ */
+bool bt_mesh_prov_link_active(void);
 
 #ifdef __cplusplus
 }
